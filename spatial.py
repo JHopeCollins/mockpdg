@@ -1,5 +1,25 @@
 import numpy as np
 from mpi4py import MPI
+from common import l2norm
+
+# index ranges for interior nodes and neighbours
+interior = np.s_[1:-1, 1:-1]
+northi = np.s_[2:, 1:-1]
+southi = np.s_[:-2, 1:-1]
+easti = np.s_[1:-1, 2:]
+westi = np.s_[1:-1, :-2]
+
+# index ranges of interior boundary nodes
+northb = np.s_[1, :]
+southb = np.s_[-2, :]
+eastb = np.s_[:, -2]
+westb = np.s_[:, 1]
+
+# index ranges of ghost nodes
+northg = np.s_[0, :]
+southg = np.s_[-1, :]
+eastg = np.s_[:, -1]
+westg = np.s_[:, 0]
 
 
 def halo_swap(ccomm, shift, data, sendbuf, recvbuf, send_idx, recv_idx):
@@ -21,72 +41,98 @@ def update_halos(ccomm, data):
     sendbuf = np.zeros(data.shape[0], dtype=data.dtype)
     recvbuf = np.zeros(data.shape[0], dtype=data.dtype)
 
-    halo_swap(ccomm, (0, 1), data, sendbuf, recvbuf, np.s_[:,-2], np.s_[:,0])
-    halo_swap(ccomm, (0, -1), data, sendbuf, recvbuf, np.s_[:,1], np.s_[:,-1])
+    east_shift = (0, 1)
+    west_shift = (0, -1)
+    north_shift = (1, 1)
+    south_shift = (1, -1)
+
+    halo_swap(ccomm, east_shift, data, sendbuf, recvbuf, eastb, westg)
+    halo_swap(ccomm, west_shift, data, sendbuf, recvbuf, westb, eastg)
     
-    halo_swap(ccomm, (1, 1), data, sendbuf, recvbuf, np.s_[1,:], np.s_[-1,:])
-    halo_swap(ccomm, (1, -1), data, sendbuf, recvbuf, np.s_[-2,:], np.s_[0,:])
+    halo_swap(ccomm, north_shift, data, sendbuf, recvbuf, northb, southg)
+    halo_swap(ccomm, south_shift, data, sendbuf, recvbuf, southb, northg)
 
 
 def neumann_bcs(cart_comm, u):
     coordi, coordj = cart_comm.coords
     dimi, dimj = cart_comm.dims
 
+    # set ghost node equal to boundary node
+
     if coordi == 0:
-        u[:, 0] = u[:, 1]
+        u[westg] = u[westb]
 
     if coordi == dimi-1:
-        u[:, -1] = u[:, -2]
+        u[eastg] = u[eastb]
 
     if coordj == 0:
-        u[-1, :] = u[-2, :]
+        u[southg] = u[southb]
 
     if coordj == dimj-1:
-        u[0, :] = u[1, :]
+        u[northg] = u[northb]
 
 
-def jacobi_iteration(h, omega, sigma, f, ucurr, uwrk):
-    fi = f[1:-1, 1:-1]
+def jacobi_iteration(h, omega, sigma, nu, f, ucurr, uwrk):
+    fi = f[interior]
 
-    ut = uwrk[1:-1, 1:-1]
+    ut = uwrk[interior]
+    uc = ucurr[interior]
 
-    un = ucurr[2:, 1:-1]
-    us = ucurr[:-2, 1:-1]
+    un = ucurr[northi]
+    us = ucurr[southi]
 
-    ue = ucurr[1:-1, 2:]
-    uw = ucurr[1:-1, :-2]
+    ue = ucurr[easti]
+    uw = ucurr[westi]
 
     h2 = h*h
-    d = sigma*h2 + 4
+    d = sigma*h2 + 4*nu
     d1 = 1/d
 
-    ut[...] = d1*(h2*fi + un + us + ue + uw)
-    ucurr[...] = (1 - omega)*ucurr[...] + omega*uwrk[...]
+    ut[...] = d1*(h2*fi + nu*(un + us + ue + uw))
+    uc[...] = (1 - omega)*uc[...] + omega*ut[...]
 
 
-def solve_helmholtz(comm, bcs, omega, niterations, h, sigma, f, ucurr, uwrk):
-    for i in range(niterations):
+def solve_helmholtz(comm, omega, niterations, tol, h,
+                    bcs, sigma, nu, f, ucurr, uwrk):
+    def residual(u):
+        nonlocal uwrk
+        helmholtz(comm, h, u, uwrk, sigma, nu)
+        uwrk-=f
+        return l2norm(comm, uwrk)
+
+    res0 = residual(ucurr)
+    res = res0
+    nit = 0
+    while (nit < niterations and res > res0*tol):
         update_halos(comm, ucurr)
         bcs(comm, ucurr)
-        jacobi_iteration(h, omega, sigma, f, ucurr, uwrk)
+        jacobi_iteration(h, omega, sigma, nu, f, ucurr, uwrk)
+        res = residual(ucurr)
+        nit += 1
+    return nit, res0, res
 
 
-def laplacian(comm, h, u, lap, fac=1):
+def laplacian(comm, h, u, lap, nu=1):
     assert u.shape == lap.shape
     update_halos(comm, u)
     lap[...] = 0
-    ui = u[1:-1, 1:-1]
+    ui = u[interior]
 
-    un = u[2:, 1:-1]
-    us = u[:-2, 1:-1]
+    un = u[northi]
+    us = u[southi]
 
-    ue = u[1:-1, 2:]
-    uw = u[1:-1, :-2]
+    ue = u[easti]
+    uw = u[westi]
 
-    h2i = fac/(h*h)
+    h2i = nu/(h*h)
 
-    lap[1:-1, 1:-1] = h2i*(un + us + ue + uw - 4*ui)
+    lap[interior] = h2i*(un + us + ue + uw - 4*ui)
 
+
+def helmholtz(comm, h, u, helm, sigma=1, nu=1):
+    assert u.shape == helm.shape
+    laplacian(comm, h, u, helm, -nu)
+    helm[interior] += sigma*u[interior]
 
 def local_grid(ccomm, L, n):
     coordi, coordj = ccomm.coords
@@ -104,17 +150,17 @@ def local_grid(ccomm, L, n):
     return np.meshgrid(xl, yl)
 
 
-def global_array(ccomm, arr, n):
-    coordi, coordj = ccomm.coords
-    assert ccomm.dims[0] == ccomm.dims[1]
-    nrank = ccomm.dims[0]
+def global_array(cart_comm, arr, n):
+    coordi, coordj = cart_comm.coords
+    assert cart_comm.dims[0] == cart_comm.dims[1]
+    nrank = cart_comm.dims[0]
 
     nl = n//nrank
     iloc = coordi*nl
     jloc = coordj*nl
 
     garr = np.zeros((n+1, n+1))
-    garr[iloc:iloc+nl, jloc:jloc+nl] = arr[1:-1, 1:-1]
-    cartcomm.Allreduce(MPI.IN_PLACE, garr)
+    garr[iloc:iloc+nl, jloc:jloc+nl] = arr[interior]
+    cart_comm.Allreduce(MPI.IN_PLACE, garr)
 
     return garr
