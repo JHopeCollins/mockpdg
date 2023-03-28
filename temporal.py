@@ -1,6 +1,6 @@
 import numpy as np
 from mpi4py import MPI
-from mpi4py_fft.pencil import Pencil, Subcomm
+from pencil import Pencil, Subcomm
 from common import flatten
 
 
