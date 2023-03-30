@@ -34,7 +34,7 @@ def print_once(comm, text):
 
 
 def l2norm(comm, u):
-    local_sum = np.sum(u*u)
+    local_sum = np.sum(u*np.conj(u)).real
     local_size = np.prod(u.shape)
     glob = np.array([local_sum, local_size])
     comm.Allreduce(MPI.IN_PLACE, glob)

@@ -1,6 +1,6 @@
 import numpy as np
 from mpi4py import MPI
-from common import l2norm
+from common import l2norm, print_once
 
 # index ranges for interior nodes and neighbours
 interior = np.s_[1:-1, 1:-1]
@@ -72,6 +72,25 @@ def neumann_bcs(cart_comm, u):
         u[northg] = u[northb]
 
 
+def dirichlet_bcs(cart_comm, u):
+    coordi, coordj = cart_comm.coords
+    dimi, dimj = cart_comm.dims
+
+    # set ghost node equal to boundary node
+
+    if coordi == 0:
+        u[westg] = 0
+
+    if coordi == dimi-1:
+        u[eastg] = 0
+
+    if coordj == 0:
+        u[southg] = 0
+
+    if coordj == dimj-1:
+        u[northg] = 0
+
+
 def jacobi_iteration(h, omega, sigma, nu, f, ucurr, uwrk):
     fi = f[interior]
 
@@ -98,7 +117,7 @@ def solve_helmholtz(comm, omega, niterations, tol, h,
         nonlocal uwrk
         helmholtz(comm, h, u, uwrk, sigma, nu)
         uwrk-=f
-        return l2norm(comm, uwrk)
+        return l2norm(comm, uwrk[interior])
 
     res0 = residual(ucurr)
     res = res0
@@ -133,6 +152,19 @@ def helmholtz(comm, h, u, helm, sigma=1, nu=1):
     assert u.shape == helm.shape
     laplacian(comm, h, u, helm, -nu)
     helm[interior] += sigma*u[interior]
+
+
+def diffusion_timesteps(comm, omega, niterations, tol, h,
+                        nt, bcs, dt, nu, u0, u1, uwrk, verbose=True):
+    met = []
+    for i in range(nt):
+        nit, res0, res = solve_helmholtz(comm, omega, niterations, tol, h,
+                                         bcs, 1, dt*nu, u0, u1, uwrk)
+        met.append([nit, res0, res])
+        if verbose: print_once(comm, f"{i}: {nit}, {res/res0}")
+        u0[:] = u1[:]
+    return met
+
 
 def local_grid(ccomm, L, n):
     coordi, coordj = ccomm.coords
