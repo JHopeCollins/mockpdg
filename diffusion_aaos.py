@@ -37,31 +37,37 @@ def allatonce_residual(time_comm, space_comm, dt, h, nu, uinit, u1, u0, res):
 
 global_comm = MPI.COMM_WORLD
 
-nranki = 1
-nrankj = 1
-nt = 16
+nranki = 2
+nrankj = 2
+nt = 32
 
 space_comm, time_comm = time.space_time_comms(global_comm,
                                               nrankj, nrankj, nt)
+
+grank = global_comm.rank
+trank = time_comm.rank
+srank = space_comm.rank
+print_in_order(global_comm, f"Global rank {grank}, time rank {trank}, space rank {srank}")
 
 # problem parameters
 
 alpha = 1e-3
 
 L = 1
-n = 2**6
+n = 2**9
 nu = 5
 
 h = L/n
 
-cfl = 4
+cfl = 5
 
 dt = h*h*cfl/nu
 
 omega = 1
 
-tol=1e-5
-space_its = 1e3
+stol=1e-5
+space_its = 2e3
+atol = 7e-10
 time_its = 4
 print_once(global_comm, f"({n}, {space_its}, {time_its}, {alpha}, {h}, {dt})")
 
@@ -103,7 +109,10 @@ eigval1 = eigvals1[time_comm.rank]
 eigval2 = eigvals2[time_comm.rank]
 
 allatonce_residual(time_comm, space_comm, dt, h, nu, uinit, u1, u0, res)
-print_once(global_comm, f" 0 | {l2norm(global_comm, u1)} | {l2norm(global_comm, res)}")
+unorm = l2norm(global_comm, u1)
+resnorm = l2norm(global_comm, res)
+print_once(global_comm, f" 0 | {unorm} | {resnorm}")
+resnorm0 = resnorm
 
 for i in range(time_its):
 
@@ -125,10 +134,10 @@ for i in range(time_its):
     # block solve
 
     ucpx[:] = 0
-    ni, r0, r = space.solve_helmholtz(space_comm, omega, space_its, tol,
+    ni, r0, r = space.solve_helmholtz(space_comm, omega, space_its, stol,
                                       h, bcs, eigval1, nu, cres, ucpx, cwrk)
-    # if space_comm.rank == 0:
-    #     print_in_order(time_comm, f"{ni}, {r/r0}")
+    if space_comm.rank == 0:
+        print_in_order(time_comm, f"{ni}, {r/r0}")
 
     # ifft residual
 
@@ -145,5 +154,9 @@ for i in range(time_its):
 
     u1 -= res
 
-    print_once(global_comm, f" {i+1} | {l2norm(global_comm, u1)} | {l2norm(global_comm, res)}")
+    unorm = l2norm(global_comm, u1)
+    resnorm = l2norm(global_comm, res)
+    print_once(global_comm, f" {i+1} | {unorm} | {resnorm}")
+    if resnorm/resnorm0 < atol:
+        break
     #print_once(global_comm, "")
