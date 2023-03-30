@@ -25,21 +25,13 @@ def timestep_residual(comm, dt, h, nu, u1, u0, res):
     res[interior] += dt1*(u1[interior] - u0[interior])
 
 
-def allatonce_residual(time_comm, space_comm, dt, h, nu, uinit, u1, u0, res):
-    time.update_time_halo(time_comm, u1, u0)
-    if time_comm.rank == 0:
-        u0[:] = uinit
-    timestep_residual(space_comm, dt, h, nu, u1, u0, res)
-    space.dirichlet_bcs(space_comm, res)
-
-
 # set up parallelism
 
 global_comm = MPI.COMM_WORLD
 
 nranki = 1
 nrankj = 1
-nt = 16
+nt = 4
 
 space_comm, time_comm = time.space_time_comms(global_comm,
                                               nrankj, nrankj, nt)
@@ -62,7 +54,7 @@ omega = 1
 
 tol=1e-5
 space_its = 1e3
-time_its = 4
+time_its = 3
 print_once(global_comm, f"({n}, {space_its}, {time_its}, {alpha}, {h}, {dt})")
 
 # set up spatial problem
@@ -102,14 +94,31 @@ eigvals2 = fft(gamma_full*c2col, norm='backward')
 eigval1 = eigvals1[time_comm.rank]
 eigval2 = eigvals2[time_comm.rank]
 
-allatonce_residual(time_comm, space_comm, dt, h, nu, uinit, u1, u0, res)
-print_once(global_comm, f" 0 | {l2norm(global_comm, u1)} | {l2norm(global_comm, res)}")
+# timestep from serial method to compare against
+
+userial = uinit.copy()
+u0 = uinit.copy()
+uwrk = uinit.copy()
+
+metrics = space.diffusion_timesteps(space_comm, omega, space_its, tol, h,
+                                    time_comm.rank+1, bcs, dt, nu,
+                                    u0, userial, uwrk, verbose=False)
+
+print_once(global_comm, "initial error:")
+if space_comm.rank == 0:
+    print_in_order(time_comm, f"error: {l2norm(space_comm, userial - u1)}")
+print_once(global_comm, "")
 
 for i in range(time_its):
+    print_once(global_comm, f"aaos iteration {i}")
 
-    # residual of local timestep of all-at-once system
+    # residual for local timestep
 
-    allatonce_residual(time_comm, space_comm, dt, h, nu, uinit, u1, u0, res)
+    time.update_time_halo(time_comm, u1, u0)
+    if time_comm.rank == 0:
+        u0[:] = uinit
+    timestep_residual(space_comm, dt, h, nu, u1, u0, res)
+    bcs(space_comm, res)
 
     # fft residual
 
@@ -145,5 +154,8 @@ for i in range(time_its):
 
     u1 -= res
 
-    print_once(global_comm, f" {i+1} | {l2norm(global_comm, u1)} | {l2norm(global_comm, res)}")
-    #print_once(global_comm, "")
+    if space_comm.rank == 0:
+        print_in_order(time_comm, f"error: {l2norm(space_comm, userial - u1)}")
+
+    print_once(global_comm, f"{l2norm(global_comm, u1)} | {l2norm(global_comm, res)}")
+    print_once(global_comm, "")
